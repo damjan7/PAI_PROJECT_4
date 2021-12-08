@@ -185,13 +185,6 @@ class VPGBuffer:
         # Replace this by computing the reward-to-go for each timepoint.
         # Hint: use the discount_cumsum function.
 
-        # their sol
-        self.ret_buf[path_slice] = discount_cumsum(
-            rews, self.gamma)[0] * np.ones(self.ptr - self.path_start_idx)
-
-        self.path_start_idx = self.ptr
-        ##
-
         """ 
         discount_cumsum fct
         Compute  cumulative sums of vectors.
@@ -200,19 +193,33 @@ class VPGBuffer:
         Output: [x0 + discount * x1 + discount^2 * x2 + ... , x1 + discount * x2 + ... , ... , xn]
         """
 
+        # their sol
+        #print(len(rews))
+        #print(path_slice)
+        # rews is the vector of ??accumulated undiscounted rewards for a given trajectory/episode
+        # it can at most be of length 301 (since the "sim" will be stopped after 300 timesteps)
+        # and we append a 1 at the end
+        # we have AT MOST 3000 steps in total, so T = 3000
+
+        # rew_buf stores all the rewards of the whole epoch
+        # I will subtract the previous rewards from the rews vector!!! before discounting ofc.
+
+        for i in range(len(rews)):
+            rews[i] = rews[i] - rews[i - 1]
+
+        self.ret_buf[path_slice] = discount_cumsum(
+            rews, self.gamma)[0] * np.ones(self.ptr - self.path_start_idx)
+
+        #print(len(self.ret_buf))
+
+        self.path_start_idx = self.ptr
+        ##
+
         # maybe with a for loop?
         # for cur_state in range(len(rews)):
         #    sl = slice(cur_state, self.ptr)
         #    self.ret_buf[slice] = discount_cumsum(
         #        rews, self.gamma)[0] * np.ones(self.ptr - cur_state)
-
-        #self.path_start_idx = self.ptr
-
-        #rew_path_slice = slice(self.ptr, self.max_size)
-        # self.ret_buf[rew_path_slice] = discount_cumsum(
-        #    rews, self.gamma)[0] * np.ones(self.max_size - self.ptr)
-
-        #self.path_start_idx = self.max_size
 
     def get(self):
         """
@@ -279,6 +286,7 @@ class Agent:
 
         logp = self.ac.pi.forward(obs, act)[1]
         loss = - (logp * ret).mean()
+        print(ret.size())
         loss.backward()
         self.pi_optimizer.step()
 
@@ -422,8 +430,8 @@ def main():
     agent.train()
 
     rec = VideoRecorder(env, "policy.mp4")
-    episode_length = 300
-    n_eval = 100
+    episode_length = 300  # 300 orig
+    n_eval = 100  # 100 orig
     returns = []
     print("Evaluating agent...")
 
