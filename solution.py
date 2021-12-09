@@ -17,7 +17,8 @@ def discount_cumsum(x, discount):
     Compute  cumulative sums of vectors.
 
     Input: [x0, x1, ..., xn]
-    Output: [x0 + discount * x1 + discount^2 * x2 + ... , x1 + discount * x2 + ... , ... , xn]
+    Output: [x0 + discount * x1 + discount^2 * \
+        x2 + ... , x1 + discount * x2 + ... , ... , xn]
     """
     return scipy.signal.lfilter([1], [1, float(-discount)], x[::-1], axis=0)[::-1]
 
@@ -170,7 +171,8 @@ class VPGBuffer:
         """
         path_slice = slice(self.path_start_idx, self.ptr)
         rews = np.append(self.rew_buf[path_slice], last_val)
-        vals = np.append(self.val_buf[path_slice], last_val)
+        vals = np.append(self.val_buf[path_slice],
+                         last_val)  # predicted values
 
         # TODO6: Implement computation of phi.
 
@@ -181,21 +183,63 @@ class VPGBuffer:
         # deltas = rews[:-1] + ...
         # self.phi_buf[path_slice] =
 
+        # MY IMPLEMENTATION
+        # delta_t = -V(s_t) + rt + gamma*V(s_t+1)
+
+        deltas = rews[:-1] - vals[:-1] + self.gamma * vals[1:]
+
+        deltasum = discount_cumsum(deltas, 1)
+
+        factor = discount_cumsum(
+            np.ones(len(rews) - 1), self.gamma * self.lam)
+
+        factor = self.gamma * self.lam
+
+        z = 0
+        for i in range(path_slice.start, path_slice.stop):
+            for j in range(len(deltas) - z):
+                self.phi_buf[i] += deltas[j + z] * (factor**j)
+            z += 1
+
+        #self.phi_buf[path_slice] = discount_cumsum(deltasum * factor, 0)[0]
+
+        '''
+        THIS IMPLEM. worked okay
+        self.phi_buf[path_slice] = discount_cumsum(
+            rews[:-1] + self.gamma * vals[1:], self.gamma)[0] * np.ones(self.ptr - self.path_start_idx)
+        j = 0
+        for i in range(path_slice.start, path_slice.stop):
+            self.phi_buf[i] = self.phi_buf[i] - \
+                vals[j] + self.lam * vals[j + 1]
+            j += 1
+
+        '''
+
+        '''
+        rewards to go modification:
+        '''
+
+        for i in range(len(rews)):
+            rews[i] = rews[i] - rews[i - 1]
+
+        ######
+
         # TODO4: currently the return is the total discounted reward for the whole episode.
         # Replace this by computing the reward-to-go for each timepoint.
         # Hint: use the discount_cumsum function.
 
-        """ 
+        """
         discount_cumsum fct
         Compute  cumulative sums of vectors.
 
         Input: [x0, x1, ..., xn]
-        Output: [x0 + discount * x1 + discount^2 * x2 + ... , x1 + discount * x2 + ... , ... , xn]
+        Output: [x0 + discount * x1 + discount^2 * \
+            x2 + ... , x1 + discount * x2 + ... , ... , xn]
         """
 
         # their sol
-        #print(len(rews))
-        #print(path_slice)
+        # print(len(rews))
+        # print(path_slice)
         # rews is the vector of ??accumulated undiscounted rewards for a given trajectory/episode
         # it can at most be of length 301 (since the "sim" will be stopped after 300 timesteps)
         # and we append a 1 at the end
@@ -204,13 +248,12 @@ class VPGBuffer:
         # rew_buf stores all the rewards of the whole epoch
         # I will subtract the previous rewards from the rews vector!!! before discounting ofc.
 
-        for i in range(len(rews)):
-            rews[i] = rews[i] - rews[i - 1]
-
         self.ret_buf[path_slice] = discount_cumsum(
             rews, self.gamma)[0] * np.ones(self.ptr - self.path_start_idx)
 
-        #print(len(self.ret_buf))
+        # rt + V(st+1) - V(st)
+
+        # print(len(self.ret_buf))
 
         self.path_start_idx = self.ptr
         ##
@@ -230,7 +273,14 @@ class VPGBuffer:
         self.ptr, self.path_start_idx = 0, 0
 
         # TODO7: Here it may help to normalize the values in self.phi_buf
-        self.phi_buf = self.phi_buf
+        sd_phi = self.phi_buf.std()
+        mean_phi = self.phi_buf.mean()
+        self.phi_buf = (self.phi_buf - mean_phi) / sd_phi
+
+        '''
+        self.logp_buf = (self.logp_buf - self.logp_buf.mean()
+                         ) / self.logp_buf.std()
+        '''
 
         data = dict(obs=self.obs_buf, act=self.act_buf, ret=self.ret_buf,
                     phi=self.phi_buf, logp=self.logp_buf)
@@ -278,15 +328,18 @@ class Agent:
         # get policy:
 
         # def compute_loss(obs, act, weights):
-        #logp = get_policy(obs).log_prob(act)
+        # logp = get_policy(obs).log_prob(act)
         # return -(logp * weights).mean()
 
         # using this loss fct it works!
         # actually just implementing from p.30 slides 11
 
+        # for todo 8: from the task description the only thing i need to change
+        # is the instead of the rewards i use the advantage fct estimate phi??
+        # or does the phi act as baseline so we subtract it from the rwards?
+
         logp = self.ac.pi.forward(obs, act)[1]
-        loss = - (logp * ret).mean()
-        print(ret.size())
+        loss = -(logp * (phi)).mean()
         loss.backward()
         self.pi_optimizer.step()
 
@@ -311,8 +364,22 @@ class Agent:
         # In each update, compute a loss for the value function, call loss.backwards() and
         # then v_optimizer.step()
         # Before doing any computation, always call.zero_grad on the relevant optimizer
-        self.v_optimizer.zero_grad()
 
+        # IDEA
+        # we want to minimize the squared loss between the current value fct
+        # and the true value fct
+        # Obviously, the true value function is not initially known.
+        # Therefore, we substitute in a target. In Monte Carlo learning, the target is the return Gₙ
+
+        self.v_optimizer.zero_grad()
+        # returns the estimated value for all observed states
+        v_est = self.ac.v.forward(obs)
+        # print(v_est[0:15], ret[0:15])
+        v_loss = torch.pow((ret - v_est), 2).mean()
+        v_loss.backward()
+        self.v_optimizer.step()
+
+        # NOT SURE IF THIS MAKES SENSE
         return
 
     def train(self):
@@ -333,7 +400,7 @@ class Agent:
         # Number of training steps per epoch
         steps_per_epoch = 3000
         # Number of epochs to train for
-        epochs = 50
+        epochs = 50  # orig. 50
         # The longest an episode can go on before cutting it off
         max_ep_len = 300
         # Discount factor for weighting future rewards
@@ -404,8 +471,8 @@ class Agent:
 
         IMPORTANT: This function is called by the checker to evaluate your agent.
         You SHOULD NOT change the arguments this function takes and what it outputs!
-        It is not used in your own training code. Instead the .step function in 
-        MLPActorCritic is used since it also outputs relevant side-information. 
+        It is not used in your own training code. Instead the .step function in
+        MLPActorCritic is used since it also outputs relevant side-information.
         """
         # TODO3: Implement this function.
         obs = torch.from_numpy(obs).float()
